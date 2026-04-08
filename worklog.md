@@ -94,3 +94,35 @@ Stage Summary:
 - 24h proposal: Cron job runs every 2 hours, checks for leads older than 24h without proposal, generates AI-powered personalized proposals, and emails them
 - Both features require SMTP configuration in .env to activate (graceful fallback when not configured)
 - Lint passes cleanly, dev server running on port 3000
+
+---
+Task ID: 5
+Agent: Main
+Task: Rediseñar tareas automatizadas para usar MCP Volkern en vez de envío automático del sistema
+
+Work Log:
+- User clarified: "con el mcp tu puedes enviar estos datos al crm, no necesita enviarlo el sistema, solo debes crear las tareas"
+- Reviewed MCP Volkern repository (35 tools): volkern_create_task, volkern_send_whatsapp, volkern_create_note, volkern_list_leads, volkern_create_interaction, etc.
+- Removed automatic email sending from submit-lead route (restored original clean version)
+- Removed: src/lib/email.ts, src/app/api/send-proposal/, src/app/api/send-analysis-email/
+- Removed nodemailer dependency (no longer needed)
+- Deleted old cron jobs (72488, 72511, 72512) and created 2 new ones using MCP Volkern:
+
+**Tarea 1 - Enviar datos a análisis (cron #72517)**:
+- Ejecuta cada 6 horas
+- GET /api/leads-pending-analysis → obtiene leads sin notificar
+- Por cada lead: volkern_create_note (datos factura) + volkern_create_task (análisis 24h)
+- Marca como procesado localmente
+
+**Tarea 2 - Propuesta al lead en 24h (cron #72518)**:
+- Ejecuta cada 2 horas
+- POST /api/send-proposal con force=true → leads >24h sin propuesta
+- Por cada lead: volkern_send_whatsapp (propuesta personalizada) + volkern_create_task (seguimiento 48h) + volkern_create_interaction
+
+- Kept SMTP config in .env for potential future use
+- Lint passes cleanly
+
+Stage Summary:
+- Las 2 tareas ahora usan directamente las herramientas del MCP Volkern (notas, tareas, WhatsApp, interacciones)
+- El sistema Next.js solo guarda datos localmente y envía al CRM; ya no envía emails automáticamente
+- El agente (vía cron) es quien orquesta: notificar análisis y enviar propuestas usando el MCP
