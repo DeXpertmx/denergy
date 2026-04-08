@@ -61,3 +61,36 @@ Stage Summary:
 - Invoice extraction now correctly handles both images (JPG/PNG/WebP) and documents (PDF)
 - Better error messages shown to users when extraction fails
 - Dev server stability improved by removing tee pipe from dev script
+
+---
+Task ID: 4
+Agent: Main
+Task: Create two automated tasks: (1) email invoice data to analysis, (2) 24h follow-up proposal to lead
+
+Work Log:
+- Installed nodemailer + @types/nodemailer for email sending
+- Updated Prisma schema: added `analysisEmailSent` (Boolean) and `proposalSentAt` (DateTime?) to Lead model
+- Created `src/lib/email.ts` with:
+  - `sendAnalysisEmail()` — sends professionally formatted HTML email with all invoice data to analysis team (energy@dimensionexpert.com)
+  - `sendProposalEmail()` — sends personalized proposal email to the lead with WhatsApp CTA
+  - `isEmailConfigured()` — checks if SMTP is configured before attempting sends
+  - Beautiful responsive HTML email templates with Dimension Energy branding
+- Modified `src/app/api/submit-lead/route.ts`:
+  - Added step 3: send analysis email immediately after lead submission and CRM sync
+  - Marks `analysisEmailSent = true` on success
+  - Gracefully skips if SMTP not configured (logs warning)
+- Created `src/app/api/send-proposal/route.ts`:
+  - POST with `{ leadId }` — generates AI proposal for specific lead and sends email
+  - POST with `{ force: true }` — batch processes all pending leads (created >24h ago, no proposal sent)
+  - Uses LLM (DeepSeek) to generate personalized HTML proposal based on invoice data
+  - Rate-limits to 10 leads per batch with 3s delay between emails
+  - Updates `proposalSentAt` on success
+- Set up cron job (ID: 72488) — runs every 2 hours to check for pending proposals
+  - Prompt instructs agent to call POST /api/send-proposal with force=true
+- Updated `.env` with SMTP configuration section (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, ANALYSIS_EMAIL)
+
+Stage Summary:
+- Analysis email: Automatically sent to energy@dimensionexpert.com when a lead submits an invoice with full invoice data in a professional HTML template
+- 24h proposal: Cron job runs every 2 hours, checks for leads older than 24h without proposal, generates AI-powered personalized proposals, and emails them
+- Both features require SMTP configuration in .env to activate (graceful fallback when not configured)
+- Lint passes cleanly, dev server running on port 3000

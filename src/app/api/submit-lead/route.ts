@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { sendAnalysisEmail, isEmailConfigured } from "@/lib/email";
 
 // Volkern CRM configuration
 const VOLKERN_API_URL = process.env.VOLKERN_API_URL || "https://volkern.app/api";
@@ -120,13 +121,45 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    // ---- 3. Send analysis email ----
+    let analysisEmailResult = { success: false, error: "Email not configured" };
+    if (isEmailConfigured()) {
+      analysisEmailResult = await sendAnalysisEmail({
+        leadId: dbLead.id,
+        nombre: lead.nombre,
+        email: lead.email,
+        whatsapp: lead.whatsapp,
+        cups: invoice?.cups || undefined,
+        direccion: invoice?.direccion || undefined,
+        comercializadora: invoice?.comercializadora || undefined,
+        tarifa: invoice?.tarifa || undefined,
+        potenciaP1: invoice?.potencia_p1 || undefined,
+        potenciaP2: invoice?.potencia_p2 || undefined,
+        consumoMensual: invoice?.consumo_mensual || undefined,
+        importeTotal: invoice?.importe_total || undefined,
+        fechaFactura: invoice?.fecha_factura || undefined,
+        periodoFacturacion: invoice?.periodo_facturacion || undefined,
+        fileName: invoice?.file_name || undefined,
+        createdAt: dbLead.createdAt.toISOString(),
+      });
+
+      if (analysisEmailResult.success) {
+        await db.lead.update({
+          where: { id: dbLead.id },
+          data: { analysisEmailSent: true },
+        });
+      }
+    } else {
+      console.log("[Email] SMTP not configured. Skipping analysis email.");
+      console.log("[Email] To enable: Set SMTP_HOST, SMTP_USER, SMTP_PASS in .env");
+    }
+
     return NextResponse.json({
       success: true,
       localId: dbLead.id,
       volkernResult,
-      message: volkernResult.success
-        ? "Lead enviado correctamente a Volkern CRM"
-        : "Datos guardados localmente (CRM no configurado)",
+      analysisEmail: analysisEmailResult,
+      message: `Lead procesado correctamente${analysisEmailResult.success ? '. Email de análisis enviado.' : ''}`,
     });
   } catch (error) {
     console.error("[API] Error in submit-lead:", error);

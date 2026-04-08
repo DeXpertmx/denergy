@@ -45,9 +45,11 @@ model Lead {
   fileSize      Int?
   fileBase64    String?
   invoiceContext String?
-  crmSent       Boolean  @default(false)
-  crmResponse   String?
-  createdAt     DateTime @default(now())
+  crmSent         Boolean    @default(false)
+  crmResponse     String?
+  analysisEmailSent Boolean  @default(false)
+  proposalSentAt  DateTime?
+  createdAt       DateTime   @default(now())
 }
 
 model ContactMessage {
