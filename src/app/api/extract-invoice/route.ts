@@ -46,12 +46,12 @@ export async function POST(request: NextRequest) {
     // Build the image URL - use data URI for base64
     const imageUrl = `data:${mimeType};base64,${fileBase64}`;
 
-    // Check which AI provider to use
-    const aiProvider = process.env.AI_PROVIDER || "openai";
+    // Use OpenRouter if API key is configured, otherwise fallback to z-ai SDK (sandbox only)
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
     let content: string;
 
-    if (aiProvider === "openai") {
-      content = await callOpenAI(imageUrl);
+    if (openRouterKey) {
+      content = await callOpenRouter(imageUrl);
     } else {
       // Fallback to z-ai-web-dev-sdk (only works in sandbox)
       const ZAI = (await import("z-ai-web-dev-sdk")).default;
@@ -117,32 +117,28 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// OpenAI-compatible API call (works with OpenAI, DeepSeek, etc.)
-async function callOpenAI(imageUrl: string): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-  const model = process.env.OPENAI_MODEL || "gpt-4o";
+// OpenRouter API call (works with any vision model)
+async function callOpenRouter(imageUrl: string): Promise<string> {
+  const apiKey = process.env.OPENROUTER_API_KEY!;
+  const model = process.env.OPENROUTER_MODEL || "z-ai/glm-4.5-air:free";
+  const siteUrl = process.env.SITE_URL || "https://dimensionenergy.vercel.app";
+  const siteName = "Dimension Energy";
 
-  if (!apiKey) {
-    throw new Error(
-      "OPENAI_API_KEY no configurada. En Vercel, agrega esta variable de entorno."
-    );
-  }
-
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
+      "HTTP-Referer": siteUrl,
+      "X-Title": siteName,
     },
     body: JSON.stringify({
       model,
       messages: [
-        { role: "user", content: EXTRACTION_PROMPT },
         {
           role: "user",
           content: [
-            { type: "text", text: "Aquí tienes la factura:" },
+            { type: "text", text: EXTRACTION_PROMPT },
             { type: "image_url", image_url: { url: imageUrl } },
           ],
         },
@@ -154,7 +150,7 @@ async function callOpenAI(imageUrl: string): Promise<string> {
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`OpenAI API error (${response.status}): ${errorText}`);
+    throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
   }
 
   const data = await response.json();
