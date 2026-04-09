@@ -43,19 +43,18 @@ export async function POST(request: NextRequest) {
     if (ext === "pdf") mimeType = "application/pdf";
     if (ext === "webp") mimeType = "image/webp";
 
-    // Build the image URL - use data URI for base64
-    const imageUrl = `data:${mimeType};base64,${fileBase64}`;
-
-    // Use OpenRouter if API key is configured, otherwise fallback to z-ai SDK (sandbox only)
-    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    // Provider priority: Gemini > z-ai SDK (sandbox only)
+    const geminiKey = process.env.GEMINI_API_KEY;
     let content: string;
 
-    if (openRouterKey) {
-      content = await callOpenRouter(imageUrl);
+    if (geminiKey) {
+      content = await callGemini(geminiKey, fileBase64, mimeType);
     } else {
       // Fallback to z-ai-web-dev-sdk (only works in sandbox)
       const ZAI = (await import("z-ai-web-dev-sdk")).default;
       const zai = await ZAI.create();
+
+      const imageUrl = `data:${mimeType};base64,${fileBase64}`;
 
       const response = await zai.chat.completions.createVision({
         messages: [
@@ -117,47 +116,56 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// OpenRouter API call (works with any vision model)
-async function callOpenRouter(imageUrl: string): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY!;
-  const model = process.env.OPENROUTER_MODEL || "z-ai/glm-4.5-air:free";
-  const siteUrl = process.env.SITE_URL || "https://dimensionenergy.vercel.app";
-  const siteName = "Dimension Energy";
+// Google Gemini 1.5 Flash API call
+async function callGemini(
+  apiKey: string,
+  fileBase64: string,
+  mimeType: string
+): Promise<string> {
+  const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "HTTP-Referer": siteUrl,
-      "X-Title": siteName,
+  const payload = {
+    contents: [
+      {
+        parts: [
+          { text: EXTRACTION_PROMPT },
+          {
+            inlineData: {
+              mimeType,
+              data: fileBase64,
+            },
+          },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 1500,
+      responseMimeType: "application/json",
     },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: EXTRACTION_PROMPT },
-            { type: "image_url", image_url: { url: imageUrl } },
-          ],
-        },
-      ],
-      max_tokens: 1500,
-    }),
+  };
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(60000),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+    throw new Error(`Gemini API error (${response.status}): ${errorText}`);
   }
 
   const data = await response.json();
-  const messageContent = data.choices?.[0]?.message?.content;
+  const messageContent = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
   if (!messageContent) {
-    throw new Error("Respuesta vacía del modelo");
+    const blockReason = data.candidates?.[0]?.finishReason;
+    throw new Error(
+      `Respuesta vacía del modelo${blockReason ? ` (finishReason: ${blockReason})` : ""}`
+    );
   }
 
   return messageContent;
