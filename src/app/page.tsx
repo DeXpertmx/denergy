@@ -13,7 +13,7 @@ import type { InvoiceFormData } from '@/components/dimension-energy/invoice-form
 import { InvoiceModal } from '@/components/dimension-energy/invoice-modal';
 import type { ExtractedInvoiceData } from '@/components/dimension-energy/invoice-modal';
 import { FAQ } from '@/components/dimension-energy/faq';
-import { Contact } from '@/components/dimension-energy/contact';
+// Contact form is handled by inline ContactInternal below
 import { Footer } from '@/components/dimension-energy/footer';
 import { PrivacyPage } from '@/components/dimension-energy/privacy-page';
 import { CookiesPage } from '@/components/dimension-energy/cookies-page';
@@ -40,8 +40,7 @@ export default function HomePage() {
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [pendingFormData, setPendingFormData] = useState<InvoiceFormData | null>(null);
 
-  // Contact form submission (exposed to Contact component via ref-like pattern)
-  const [contactFormKey, setContactFormKey] = useState(0);
+
 
   // Hash navigation on load
   useEffect(() => {

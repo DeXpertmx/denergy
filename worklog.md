@@ -126,3 +126,27 @@ Stage Summary:
 - Las 2 tareas ahora usan directamente las herramientas del MCP Volkern (notas, tareas, WhatsApp, interacciones)
 - El sistema Next.js solo guarda datos localmente y envía al CRM; ya no envía emails automáticamente
 - El agente (vía cron) es quien orquesta: notificar análisis y enviar propuestas usando el MCP
+
+---
+Task ID: 6
+Agent: Main
+Task: Revisión completa de consistencia del proyecto Dimension Energy
+
+Work Log:
+- Revisados todos los archivos clave: .env, prisma/schema.prisma, package.json, 5 API routes, 4 scripts, 13 componentes, store/navigation.ts
+- Verificada consistencia de campos entre frontend (page.tsx) → API (submit-lead) → Prisma schema → SQLite DB
+- Verificada la clave OPENROUTER_API_KEY en .env con modelo z-ai/glm-4.5-air:free
+- Verificados los 2 cron jobs activos y sus scripts asociados
+- ESLint pasa limpio (0 errores)
+- Prisma db push ejecutado sin errores (schema consistente con DB)
+- Dev server compila correctamente (GET / 200)
+- **Corrección 1**: Eliminado import muerto de `Contact` en page.tsx (no se usaba, se usa ContactInternal inline)
+- **Corrección 2**: Eliminado estado muerto `contactFormKey` en page.tsx
+- **Corrección 3**: Cron de propuesta (#72602) ejecutaba cada 6h en vez de cada 2h. Eliminado y recreado (#74259) con `0 0 */2 * * ?`
+
+Stage Summary:
+- Proyecto consistente y sin errores
+- Variables de entorno correctas (OPENROUTER_API_KEY, VOLKERN_API_KEY, VOLKERN_API_URL)
+- Cron 1 (Análisis): cada 6h (#72601) — usa scripts/pending-leads.js → MCP Volkern
+- Cron 2 (Propuesta): cada 2h (#74259) — usa scripts/pending-proposals.js → MCP Volkern
+- Limpieza de código muerto en page.tsx
