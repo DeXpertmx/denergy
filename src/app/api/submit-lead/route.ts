@@ -7,11 +7,7 @@ const VOLKERN_API_KEY = process.env.VOLKERN_API_KEY || "";
 
 async function createVolkernLead(payload: Record<string, any>) {
   if (!VOLKERN_API_KEY) {
-    console.error("[Volkern] ERROR: VOLKERN_API_KEY is missing in Environment Variables.");
-    return { 
-      success: false, 
-      reason: "Configuración incompleta: Falta VOLKERN_API_KEY en los Secretos de Vercel." 
-    };
+    return { success: false, reason: "Configuración incompleta: Falta VOLKERN_API_KEY en Vercel." };
   }
 
   try {
@@ -22,23 +18,16 @@ async function createVolkernLead(payload: Record<string, any>) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(8000), // 8s timeout for lead creation
     });
 
     const data = await response.json().catch(() => ({}));
-
     if (!response.ok) {
-      console.error(`[Volkern] API Error (${response.status}):`, data);
-      return { 
-        success: false, 
-        reason: data.message || data.error || `Status ${response.status}`,
-        status: response.status 
-      };
+      return { success: false, reason: data.message || data.error || `Status ${response.status}` };
     }
-
     return { success: true, data };
-  } catch (error) {
-    console.error("[Volkern] Fetch error:", error);
-    return { success: false, reason: error instanceof Error ? error.message : String(error) };
+  } catch (error: any) {
+    return { success: false, reason: error.name === 'AbortError' ? 'Tiempo de espera agotado' : error.message };
   }
 }
 
@@ -47,41 +36,29 @@ async function createVolkernNote(leadId: string, content: string) {
   try {
     await fetch(`${VOLKERN_API_URL}/leads/${leadId}/notes`, {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${VOLKERN_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Authorization": `Bearer ${VOLKERN_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({ contenido: content }),
+      signal: AbortSignal.timeout(5000), // Independent 5s timeout
     });
-  } catch (e) {
-    console.error("[Volkern] Error note:", e);
-  }
+  } catch (e) { console.error("[Volkern] Note fail:", e); }
 }
 
 async function createVolkernTask(leadId: string, leadNombre: string) {
   if (!VOLKERN_API_KEY || !leadId) return;
-  
-  // Follow-up task exactly 24 hours from now
   const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  
   try {
     await fetch(`${VOLKERN_API_URL}/leads/${leadId}/tasks`, {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${VOLKERN_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Authorization": `Bearer ${VOLKERN_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         tipo: "llamada",
-        titulo: `Llamada de seguimiento: ${leadNombre}`,
-        descripcion: "Dar seguimiento a la propuesta energética enviada desde la web.",
+        titulo: `Llamada seguimiento: ${leadNombre}`,
+        descripcion: "Seguimiento propuesta energética web.",
         fechaVencimiento: tomorrow.toISOString(),
       }),
+      signal: AbortSignal.timeout(5000), // Independent 5s timeout
     });
-    console.log("[Volkern] Task created for tomorrow:", tomorrow.toISOString());
-  } catch (e) {
-    console.error("[Volkern] Error task:", e);
-  }
+  } catch (e) { console.error("[Volkern] Task fail:", e); }
 }
 
 export async function POST(request: NextRequest) {
@@ -90,24 +67,10 @@ export async function POST(request: NextRequest) {
     const { lead, invoice, context } = body;
 
     if (!lead?.nombre || !lead?.whatsapp) {
-      return NextResponse.json({ error: "Faltan campos obligatorios (nombre y whatsapp)" }, { status: 400 });
+      return NextResponse.json({ error: "Datos de contacto incompletos" }, { status: 400 });
     }
 
-    // Prepare Invoice Summary
-    const invoiceSummary = invoice ? `
---- Detalles de Factura ---
-CUPS: ${invoice.cups || 'No detectado'}
-Dirección: ${invoice.direccion || 'No detectada'}
-Comercializadora: ${invoice.comercializadoraActual || invoice.comercializadora || 'N/A'}
-Tarifa: ${invoice.tarifaActual || invoice.tarifa || 'N/A'}
-Potencia: P1: ${invoice.potenciaP1 || invoice.potencia_p1 || 'N/A'} / P2: ${invoice.potenciaP2 || invoice.potencia_p2 || 'N/A'}
-Consumo: ${invoice.consumoMensual || invoice.consumo_mensual || 'N/A'}
-Importe: ${invoice.importeTotal || invoice.importe_total || 'N/A'}
-    `.trim() : "Lead sin factura adjunta.";
-
-    const finalContext = `${context || ""}\n\n${invoiceSummary}`.trim();
-
-    // ---- 1. Save locally ----
+    // 1. Save locally (Prisma)
     const dbLead = await db.lead.create({
       data: {
         nombre: lead.nombre,
@@ -127,57 +90,52 @@ Importe: ${invoice.importeTotal || invoice.importe_total || 'N/A'}
         fileType: invoice?.file_type || null,
         fileSize: invoice?.file_size || null,
         fileBase64: invoice?.file_base64 || null,
-        invoiceContext: finalContext,
+        invoiceContext: context || null,
       },
     });
 
-    // ---- 2. Forward to Volkern CRM ----
+    // 2. Try CRM (Lead only)
     const volkernResult = await createVolkernLead({
       nombre: lead.nombre,
       email: lead.email || null,
       telefono: lead.whatsapp,
       canal: "web",
       estado: "nuevo",
-      etiquetas: ["dimension-energy", "captacion-web", "analisis-energia"],
-      contextoProyecto: finalContext,
-      notas: `Lead registrado desde el portal Dimension Energy (${new Date().toLocaleString()})`
+      etiquetas: ["dimension-energy", "analisis-web"],
+      contextoProyecto: context || "Captado desde Dimension Energy",
     });
 
-    // Robust ID identification
-    const volkernId = volkernResult.data?.id || 
-                    volkernResult.data?.lead_id || 
-                    volkernResult.data?.data?.id || 
-                    volkernResult.data?.data?.lead_id;
-    
-    if (volkernResult.success && volkernId) {
-      // Create Note & Task
-      await Promise.all([
-        createVolkernNote(volkernId, invoiceSummary),
-        createVolkernTask(volkernId, lead.nombre)
-      ]);
+    // 3. Optional CRM additions (Note/Task) - Do not crash if they fail
+    if (volkernResult.success) {
+      const volkernId = volkernResult.data?.id || volkernResult.data?.lead_id || volkernResult.data?.data?.id;
+      if (volkernId) {
+        const invoiceSummary = `Extracción: CUPS ${invoice?.cups || 'N/A'}, Consumo ${invoice?.consumoMensual || 'N/A'}, Importe ${invoice?.importeTotal || 'N/A'}`;
+        // Parallel but isolated
+        Promise.allSettled([
+          createVolkernNote(volkernId, invoiceSummary),
+          createVolkernTask(volkernId, lead.nombre)
+        ]).catch(e => console.error("Optional CRM steps failed", e));
+      }
     }
 
-    // Update crm status locally
-    await db.lead.update({
-      where: { id: dbLead.id },
-      data: {
-        crmSent: volkernResult.success,
-        crmResponse: JSON.stringify(volkernResult),
-      },
-    });
+    // 4. Update local DB with CRM status
+    try {
+      await db.lead.update({
+        where: { id: dbLead.id },
+        data: { crmSent: volkernResult.success, crmResponse: JSON.stringify(volkernResult) },
+      });
+    } catch (e) { console.error("Local status update fail", e); }
 
     return NextResponse.json({
       success: true,
-      localId: dbLead.id,
       crmSuccess: volkernResult.success,
-      crmError: volkernResult.success ? null : volkernResult.reason,
-      message: volkernResult.success
-        ? "Lead registrado y tarea de seguimiento agendada en 24h"
-        : `Guardado localmente. Error CRM: ${volkernResult.reason || 'Desconocido'}`
+      message: volkernResult.success 
+        ? "Lead registrado con éxito" 
+        : `Guardado localmente. (Error CRM: ${volkernResult.reason || 'Saturación'})`
     });
 
-  } catch (error) {
-    console.error("[API] Error:", error);
-    return NextResponse.json({ error: "Error interno", details: String(error) }, { status: 500 });
+  } catch (error: any) {
+    console.error("Submit-Lead 500:", error);
+    return NextResponse.json({ error: "Error técnico", details: error.message }, { status: 500 });
   }
 }
