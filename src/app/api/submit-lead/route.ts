@@ -7,8 +7,11 @@ const VOLKERN_API_KEY = process.env.VOLKERN_API_KEY || "";
 
 async function createVolkernLead(payload: Record<string, any>) {
   if (!VOLKERN_API_KEY) {
-    console.log("[Volkern] No VOLKERN_API_KEY configured.");
-    return { success: false, reason: "No API Key configured in Environment" };
+    console.error("[Volkern] ERROR: VOLKERN_API_KEY is missing in Environment Variables.");
+    return { 
+      success: false, 
+      reason: "Configuración incompleta: Falta VOLKERN_API_KEY en los Secretos de Vercel." 
+    };
   }
 
   try {
