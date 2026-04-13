@@ -89,6 +89,11 @@ export default function HomePage() {
       });
 
       const result = await response.json();
+      
+      if (!response.ok) {
+        console.error('API Error Response:', result);
+        throw new Error(result.details || result.error || 'Error en el servidor');
+      }
 
       if (result.success && result.data) {
         setExtractedData({
@@ -126,14 +131,8 @@ export default function HomePage() {
         });
       }
     } catch (error) {
-      console.error('Error extracting invoice:', error);
+      console.error('Critical Error:', error);
       
-      // Attempt to extract details from error if it's a 500 JSON response
-      let errorDetail = 'No se pudo procesar la factura automáticamente. Completa los datos manualmente.';
-      if (error instanceof Error && error.message.includes('API')) {
-        errorDetail = error.message;
-      }
-
       setExtractedData({
         titular: formData.nombre,
         cups: '',
@@ -150,7 +149,7 @@ export default function HomePage() {
       
       toast({
         title: 'Error en la extracción',
-        description: errorDetail,
+        description: error instanceof Error ? error.message : 'Error desconocido. Revisa la consola.',
         variant: 'destructive',
       });
     }

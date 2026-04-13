@@ -1,28 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Configuración del esquema de respuesta para forzar JSON puro
-const EXTRACTION_PROMPT = `Analiza detalladamente esta factura eléctrica española y extrae los datos técnicos.
-Debes responder exclusivamente en formato JSON válido.
-
-Campos requeridos:
+const EXTRACTION_PROMPT = `Analiza esta factura eléctrica española y extrae los datos. 
+Responde exclusivamente con un objeto JSON válido con estas claves:
 {
-  "titular": "Nombre completo",
-  "cups": "Código ES... (20-22 caracteres)",
-  "direccion": "Dirección de suministro",
-  "comercializadoraActual": "Nombre de la empresa",
-  "tarifaActual": "Ej: 2.0TD, 3.0TD",
-  "potenciaP1": "Valor en kW",
-  "potenciaP2": "Valor en kW",
-  "consumoMensual": "Número total de kWh",
-  "importeTotal": "Valor con símbolo €",
+  "titular": "Nombre",
+  "cups": "ES...",
+  "direccion": "Dirección",
+  "comercializadoraActual": "Empresa",
+  "tarifaActual": "Tarifa",
+  "potenciaP1": "kW",
+  "potenciaP2": "kW",
+  "consumoMensual": "kWh",
+  "importeTotal": "€",
   "fechaFactura": "DD/MM/YYYY",
-  "periodoFacturacion": "Rango de fechas o días"
-}
-
-Reglas:
-1. Si un dato no es visible, usa null.
-2. No incluyas texto explicativo, solo el objeto JSON.
-3. Asegúrate de que el JSON sea válido y no tenga caracteres de control extraños.`;
+  "periodoFacturacion": "Fechas"
+}`;
 
 export async function POST(request: NextRequest) {
   try {
@@ -32,84 +24,107 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Archivo no proporcionado" }, { status: 400 });
     }
 
-    // Identificar el MIME type
     const ext = fileName?.split(".").pop()?.toLowerCase() || "";
-    let mimeType = "image/jpeg";
-    if (ext === "pdf") mimeType = "application/pdf";
-    if (ext === "png") mimeType = "image/png";
-    if (ext === "webp") mimeType = "image/webp";
+    const isPdf = ext === "pdf";
+    const mimeType = isPdf ? "application/pdf" : `image/${ext === "png" ? "png" : "jpeg"}`;
 
-    // Llamada a OpenRouter (usando Gemma 2 9B o similar que sea free)
-    const content = await callOpenRouter(fileBase64, mimeType);
+    // Clean base64
+    const base64Content = fileBase64.includes(",") ? fileBase64.split(",")[1] : fileBase64;
+    const dataUrl = `data:${mimeType};base64,${base64Content}`;
 
-    // Intentar extraer el JSON si el modelo incluyó markdown
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json({ error: "Configuración incompleta", details: "Falta OPENROUTER_API_KEY en Vercel" }, { status: 500 });
+    }
+
+    // Build the content array based on file type
+    const messageContent: any[] = [{ type: "text", text: EXTRACTION_PROMPT }];
+
+    if (isPdf) {
+      // Use "file" type for PDFs as per OpenRouter docs
+      messageContent.push({
+        type: "file",
+        file: {
+          file_data: dataUrl
+        }
+      });
+    } else {
+      // Use "image_url" for images
+      messageContent.push({
+        type: "image_url",
+        image_url: {
+          url: dataUrl
+        }
+      });
+    }
+
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://dimension-energy.app",
+        "X-Title": "Dimension Energy Extractor",
+      },
+      body: JSON.stringify({
+        model: "google/gemma-4-31b-it:free",
+        messages: [
+          {
+            role: "user",
+            content: messageContent
+          }
+        ],
+        temperature: 0.1, // Lower temperature for more consistent JSON
+      }),
+    });
+
+    const rawResponse = await response.text();
+    let result;
+
+    try {
+      result = JSON.parse(rawResponse);
+    } catch (e) {
+      console.error("OpenRouter returned non-JSON:", rawResponse);
+      return NextResponse.json({ 
+        error: "Error del proveedor de IA", 
+        details: "El servidor de IA devolvió una respuesta inválida (posiblemente saturación o error 503)." 
+      }, { status: 502 });
+    }
+
+    if (!response.ok) {
+      console.error("OpenRouter Error Details:", result);
+      const errorMsg = result.error?.message || result.error || "Error desconocido en el proveedor";
+      return NextResponse.json({ 
+        error: "Error en la extracción", 
+        details: errorMsg 
+      }, { status: response.status });
+    }
+
+    const content = result.choices?.[0]?.message?.content || "";
+    
+    // Extract JSON from markdown if necessary
     let cleanedContent = content;
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       cleanedContent = jsonMatch[0];
     }
 
-    return NextResponse.json({
-      success: true,
-      data: JSON.parse(cleanedContent)
-    });
+    try {
+      const parsedData = JSON.parse(cleanedContent);
+      return NextResponse.json({ success: true, data: parsedData });
+    } catch (e) {
+      console.error("Failed to parse AI output as JSON:", content);
+      return NextResponse.json({ 
+        error: "Error de formato", 
+        details: "La IA no generó un JSON válido. Reintenta con una imagen más clara." 
+      }, { status: 500 });
+    }
+
   } catch (error) {
-    console.error("Error en extracción:", error);
-    const errorMessage = error instanceof Error ? error.message : "Error desconocido";
+    console.error("Critical extraction error:", error);
     return NextResponse.json({ 
-      error: "Error al procesar la factura", 
-      details: errorMessage 
+      error: "Error interno", 
+      details: error instanceof Error ? error.message : "Error desconocido" 
     }, { status: 500 });
   }
 }
-
-async function callOpenRouter(base64Data: string, mimeType: string): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("Falta OPENROUTER_API_KEY en las variables de entorno");
-
-  // Limpieza de prefijos base64
-  const base64Content = base64Data.includes(",") ? base64Data.split(",")[1] : base64Data;
-
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://dimension-energy.app",
-      "X-Title": "Dimension Energy Extractor",
-    },
-    body: JSON.stringify({
-      model: "google/gemma-4-31b-it:free",
-      messages: [
-        {
-          role: "system",
-          content: "Eres un experto en extracción de datos de facturas eléctricas españolas usando Gemma 4. Responde siempre con JSON válido."
-        },
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: EXTRACTION_PROMPT
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${mimeType};base64,${base64Content}`
-              }
-            }
-          ]
-        }
-      ]
-    })
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(`OpenRouter Error: ${JSON.stringify(errorData)}`);
-  }
-
-  const result = await response.json();
-  return result.choices[0]?.message?.content || "";
-}
-
