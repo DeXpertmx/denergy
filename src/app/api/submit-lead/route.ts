@@ -1,118 +1,105 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/db";
 
-export const maxDuration = 60; // Allow enough time for DB save and webhook call
+export const maxDuration = 60;
 
-const WEBHOOK_URL = "https://webhook.dimension.expert/webhook/e2310871-0208-4e6a-a366-2ebe2e757d1f";
+const VOLKERN_API_URL = process.env.VOLKERN_API_URL || "https://volkern.app/api";
+const VOLKERN_API_KEY = process.env.VOLKERN_API_KEY || "";
 
-async function sendToWebhook(payload: Record<string, any>) {
-  try {
-    const response = await fetch(WEBHOOK_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000), // 15s timeout for webhook
-    });
+function volkernHeaders() {
+  return {
+    "Authorization": `Bearer ${VOLKERN_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+}
 
-    if (!response.ok) {
-      const text = await response.text();
-      return { success: false, reason: `Status ${response.status}: ${text}` };
-    }
-
-    return { success: true };
-  } catch (error: any) {
-    return { success: false, reason: error.name === 'AbortError' ? 'Tiempo de espera en Webhook agotado' : error.message };
-  }
+async function volkernFetch(path: string, body: Record<string, any>) {
+  const res = await fetch(`${VOLKERN_API_URL}${path}`, {
+    method: "POST",
+    headers: volkernHeaders(),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Volkern ${path} → ${res.status}: ${data?.error || JSON.stringify(data)}`);
+  return data;
 }
 
 export async function POST(request: NextRequest) {
+  if (!VOLKERN_API_KEY) {
+    return NextResponse.json({ error: "Falta VOLKERN_API_KEY en las variables de entorno de Vercel." }, { status: 500 });
+  }
+
   try {
     const body = await request.json();
     const { lead, invoice, context } = body;
 
-    if (!lead?.nombre || !lead?.whatsapp) {
-      return NextResponse.json({ error: "Datos de contacto incompletos" }, { status: 400 });
+    if (!lead?.nombre) {
+      return NextResponse.json({ error: "Falta el nombre del lead." }, { status: 400 });
     }
 
-    // 1. Convert to unified format
-    const invoiceSummary = invoice ? `
---- Detalles de Factura ---
-CUPS: ${invoice.cups || 'No detectado'}
-Dirección: ${invoice.direccion || 'No detectada'}
-Comercializadora: ${invoice.comercializadoraActual || invoice.comercializadora || 'N/A'}
-Tarifa: ${invoice.tarifaActual || invoice.tarifa || 'N/A'}
-Potencia: P1: ${invoice.potenciaP1 || invoice.potencia_p1 || 'N/A'} / P2: ${invoice.potenciaP2 || invoice.potencia_p2 || 'N/A'}
-Consumo: ${invoice.consumoMensual || invoice.consumo_mensual || 'N/A'}
-Importe: ${invoice.importeTotal || invoice.importe_total || 'N/A'}
-    `.trim() : "Lead sin factura adjunta.";
+    // Build a rich invoice context block
+    const invoiceBlock = invoice ? [
+      "══════════════════════════════",
+      "📋 DATOS FACTURA ELÉCTRICA",
+      "══════════════════════════════",
+      `👤 Titular: ${invoice.titular || "N/D"}`,
+      `📍 CUPS: ${invoice.cups || invoice.CUPS || "N/D"}`,
+      `🏠 Dirección: ${invoice.direccion || "N/D"}`,
+      `🏢 Comercializadora actual: ${invoice.comercializadoraActual || invoice.comercializadora || "N/D"}`,
+      `📊 Tarifa: ${invoice.tarifaActual || invoice.tarifa || "N/D"}`,
+      `⚡ Potencia P1: ${invoice.potenciaP1 || invoice.potencia_p1 || "N/D"} | P2: ${invoice.potenciaP2 || invoice.potencia_p2 || "N/D"}`,
+      `📈 Consumo mensual: ${invoice.consumoMensual || invoice.consumo_mensual || "N/D"}`,
+      `💶 Importe total: ${invoice.importeTotal || invoice.importe_total || "N/D"}`,
+      `📅 Fecha factura: ${invoice.fechaFactura || invoice.fecha_factura || "N/D"}`,
+      `📆 Período: ${invoice.periodoFacturacion || invoice.periodo_facturacion || "N/D"}`,
+      "══════════════════════════════",
+      "🔎 Lead captado desde: Dimension Energy (Análisis Web)",
+    ].join("\n") : "Lead sin factura adjunta.";
 
-    const finalContext = `${context || ""}\n\n${invoiceSummary}`.trim();
+    const contextoProyecto = [context || "", invoiceBlock].filter(Boolean).join("\n\n");
 
-    // 2. Save locally (Prisma)
-    const dbLead = await db.lead.create({
-      data: {
-        nombre: lead.nombre,
-        email: lead.email || "sin_email@dimension-energy.es",
-        whatsapp: lead.whatsapp,
-        cups: invoice?.cups || null,
-        direccion: invoice?.direccion || null,
-        comercializadora: invoice?.comercializadoraActual || invoice?.comercializadora || null,
-        tarifa: invoice?.tarifaActual || invoice?.tarifa || null,
-        potenciaP1: invoice?.potenciaP1 || invoice?.potencia_p1 || null,
-        potenciaP2: invoice?.potenciaP2 || invoice?.potencia_p2 || null,
-        consumoMensual: invoice?.consumoMensual || invoice?.consumo_mensual || null,
-        importeTotal: invoice?.importeTotal || invoice?.importe_total || null,
-        fechaFactura: invoice?.fechaFactura || invoice?.fecha_factura || null,
-        periodoFacturacion: invoice?.periodoFacturacion || invoice?.periodo_facturacion || null,
-        fileName: invoice?.file_name || null,
-        fileType: invoice?.file_type || null,
-        fileSize: invoice?.file_size || null,
-        fileBase64: invoice?.file_base64 || null,
-        invoiceContext: finalContext,
-      },
+    // ── STEP 1: CREATE LEAD ──
+    const leadData = await volkernFetch("/leads", {
+      nombre: lead.nombre,
+      email: lead.email || undefined,
+      telefono: lead.whatsapp || lead.telefono || undefined,
+      canal: "web",
+      estado: "nuevo",
+      etiquetas: ["dimension-energy", "analisis-web"],
+      contextoProyecto,
     });
 
-    // 3. Send payload to webhook
-    const webhookPayload = {
-      localId: dbLead.id,
-      lead: {
-        nombre: lead.nombre,
-        email: lead.email || null,
-        telefono: lead.whatsapp,
-        canal: "web",
-        estado: "nuevo",
-        etiquetas: ["dimension-energy", "analisis-web"]
-      },
-      invoice: invoice || {},
-      contextoProyecto: finalContext,
-      invoiceSummary: invoiceSummary
-    };
+    const leadId = leadData?.lead?.id || leadData?.id || leadData?.data?.id;
+    if (!leadId) {
+      throw new Error(`Lead creado pero sin ID en respuesta: ${JSON.stringify(leadData)}`);
+    }
 
-    const webhookResult = await sendToWebhook(webhookPayload);
+    // ── STEP 2: ADD NOTE WITH INVOICE SUMMARY ──
+    await volkernFetch(`/leads/${leadId}/notes`, {
+      titulo: "📄 Análisis de Factura Eléctrica",
+      contenido: invoiceBlock,
+    });
 
-    // 4. Update local DB with Webhook status
-    try {
-      await db.lead.update({
-        where: { id: dbLead.id },
-        data: { 
-          crmSent: webhookResult.success, 
-          crmResponse: JSON.stringify(webhookResult) 
-        },
-      });
-    } catch (e) { console.error("Local status update fail", e); }
+    // ── STEP 3: CREATE 24H FOLLOW-UP TASK ──
+    const followUpDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    await volkernFetch(`/leads/${leadId}/tasks`, {
+      tipo: "llamada",
+      titulo: `📞 Seguimiento: ${lead.nombre}`,
+      descripcion: "Llamada de seguimiento de propuesta energética captada en web Dimension Energy.",
+      fechaVencimiento: followUpDate,
+    });
 
     return NextResponse.json({
       success: true,
-      webhookSuccess: webhookResult.success,
-      message: webhookResult.success 
-        ? "Lead registrado y enviado al CRM exitosamente" 
-        : `Guardado localmente. (Error Webhook: ${webhookResult.reason || 'Desconocido'})`
+      leadId,
+      message: "Lead registrado en Volkern CRM con nota de factura y tarea de seguimiento en 24h.",
     });
 
   } catch (error: any) {
-    console.error("Submit-Lead 500:", error);
-    return NextResponse.json({ error: "Error técnico", details: error.message }, { status: 500 });
+    console.error("[submit-lead] Error:", error.message);
+    return NextResponse.json({
+      error: "Error al registrar en Volkern CRM",
+      details: error.message,
+    }, { status: 500 });
   }
 }
