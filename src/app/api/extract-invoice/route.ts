@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import ZAI, { VisionMessage } from 'z-ai-web-dev-sdk';
 
-export const maxDuration = 60; // Allow 1 minute for complex thinking extraction
+export const maxDuration = 60; // Legally bypass Vercel 10s limit
 
 const EXTRACTION_PROMPT = `Analiza esta factura eléctrica española y extrae los datos técnicos. 
 Responde exclusivamente con un objeto JSON válido (sin explicaciones) con estas claves:
@@ -19,10 +18,69 @@ Responde exclusivamente con un objeto JSON válido (sin explicaciones) con estas
   "periodoFacturacion": "Rango de fechas"
 }`;
 
+const TOP_FREE_MODELS = [
+  "google/gemini-2.0-flash-001:free",
+  "qwen/qwen-2-vl-72b-instruct:free",
+  "openrouter/free"
+];
+
+async function attemptExtraction(modelId: string, apiKey: string, messageContent: any[]) {
+  const controller = new AbortController();
+  // 55 seconds timeout (fits within maxDuration 60s). This prevents the "murder" limit!
+  const timeoutId = setTimeout(() => controller.abort(), 55000);
+
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://dimension-energy.app",
+        "X-Title": "Dimension Energy Extractor",
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: "user", content: messageContent }],
+        temperature: 0.1,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(`[${modelId}] ${errorData.error?.message || response.statusText}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content || "";
+    if (!content) throw new Error(`[${modelId}] Empty response content.`);
+
+    // Extract JSON
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    const cleanedContent = jsonMatch ? jsonMatch[0] : content;
+    const parsedData = JSON.parse(cleanedContent);
+
+    return { 
+      success: true, 
+      data: parsedData,
+      sourceModel: modelId 
+    };
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    console.warn(`Extraction failed for ${modelId}:`, error.message);
+    throw error;
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { fileBase64, fileName } = await request.json();
     if (!fileBase64) return NextResponse.json({ error: "Archivo no proporcionado" }, { status: 400 });
+
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) return NextResponse.json({ error: "Configuración incompleta", details: "Falta OPENROUTER_API_KEY" }, { status: 500 });
 
     const ext = fileName?.split(".").pop()?.toLowerCase() || "";
     const isPdf = ext === "pdf";
@@ -30,70 +88,32 @@ export async function POST(request: NextRequest) {
     const base64Content = fileBase64.includes(",") ? fileBase64.split(",")[1] : fileBase64;
     const dataUrl = `data:${mimeType};base64,${base64Content}`;
 
-    // 1. Initialize Z-AI SDK (Skill Logic)
-    const zai = await ZAI.create();
-
-    // 2. Prepare Messages following VLM Skill patterns
-    const messages: VisionMessage[] = [
-      {
-        role: 'assistant',
-        content: [
-          { type: 'text', text: 'Eres un experto en extracción de datos de facturas eléctricas. Devuelve solo JSON válido.' }
-        ]
-      },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: EXTRACTION_PROMPT },
-          { 
-            // Use file_url for PDFs and image_url for images as per VLM skill
-            type: isPdf ? 'file_url' : 'image_url', 
-            [isPdf ? 'file_url' : 'image_url']: { url: dataUrl } 
-          }
-        ]
-      }
-    ];
-
-    // 3. Execute with Thinking mode enabled (High Fidelity extraction)
-    // We attempt to use the SDK's native vision model
-    const response = await zai.chat.completions.createVision({
-      model: 'glm-4.6v', // This is the recommended model in your VLM skills
-      messages,
-      thinking: { type: 'enabled' } // Enabled for complex structural analysis
-    });
-
-    const content = response.choices?.[0]?.message?.content || "";
-    if (!content) {
-      throw new Error("El modelo de la Skill devolvió una respuesta vacía.");
+    const messageContent: any[] = [{ type: "text", text: EXTRACTION_PROMPT }];
+    if (isPdf) {
+      // The original working way to send PDFs via OpenRouter mapping
+      messageContent.push({ type: "image_url", image_url: { url: dataUrl } }); 
+    } else {
+      messageContent.push({ type: "image_url", image_url: { url: dataUrl } });
     }
 
-    // 4. Extract and Clean JSON
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    const cleanedContent = jsonMatch ? jsonMatch[0] : content;
-    
+    // RACE CONDITION: Try all top models in parallel. 
+    // They now have 55 seconds to reply instead of 10!
     try {
-      const parsedData = JSON.parse(cleanedContent);
+      const winner = await Promise.any(
+        TOP_FREE_MODELS.map(modelId => attemptExtraction(modelId, apiKey, messageContent))
+      );
+      
+      return NextResponse.json(winner);
+    } catch (aggregateError: any) {
+      console.error("All models failed the race:", aggregateError);
       return NextResponse.json({ 
-        success: true, 
-        data: parsedData,
-        sourceModel: 'z-ai-vlm-skill'
-      });
-    } catch (parseError) {
-      console.error("JSON Parse Error on Skill Output:", content);
-      return NextResponse.json({ 
-        error: "Error de formato en la Skill", 
-        details: "El modelo generó texto en lugar de JSON.",
-        raw: content
-      }, { status: 422 });
+        error: "Saturación total del servicio", 
+        details: "Todos los modelos gratuitos fallaron o están saturados. (Intenta un PDF de menos páginas)." 
+      }, { status: 503 });
     }
 
   } catch (error: any) {
-    console.error("Critical Skill API error:", error);
-    
-    // Fallback info for the user
-    return NextResponse.json({ 
-      error: "Error en la Skill de extracción", 
-      details: error.message || "La Skill Z-AI no respondió correctamente."
-    }, { status: 500 });
+    console.error("Critical API error:", error);
+    return NextResponse.json({ error: "Error interno", details: error.message }, { status: 500 });
   }
 }

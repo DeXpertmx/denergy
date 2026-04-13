@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
+export const maxDuration = 60; // Legally bypass Vercel 10s limit
+
 // Volkern CRM configuration
 const VOLKERN_API_URL = process.env.VOLKERN_API_URL || "https://volkern.app/api";
 const VOLKERN_API_KEY = process.env.VOLKERN_API_KEY || "";
@@ -110,8 +112,8 @@ export async function POST(request: NextRequest) {
       const volkernId = volkernResult.data?.id || volkernResult.data?.lead_id || volkernResult.data?.data?.id;
       if (volkernId) {
         const invoiceSummary = `Extracción: CUPS ${invoice?.cups || 'N/A'}, Consumo ${invoice?.consumoMensual || 'N/A'}, Importe ${invoice?.importeTotal || 'N/A'}`;
-        // Parallel but isolated
-        Promise.allSettled([
+        // Parallel Execution BUT sync with await so Vercel doesn't kill it!
+        await Promise.allSettled([
           createVolkernNote(volkernId, invoiceSummary),
           createVolkernTask(volkernId, lead.nombre)
         ]).catch(e => console.error("Optional CRM steps failed", e));
