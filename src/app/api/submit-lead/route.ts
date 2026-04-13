@@ -1,66 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
-export const maxDuration = 60; // Legally bypass Vercel 10s limit
+export const maxDuration = 60; // Allow enough time for DB save and webhook call
 
-// Volkern CRM configuration
-const VOLKERN_API_URL = process.env.VOLKERN_API_URL || "https://volkern.app/api";
-const VOLKERN_API_KEY = process.env.VOLKERN_API_KEY || "";
+const WEBHOOK_URL = "https://webhook.dimension.expert/webhook/e2310871-0208-4e6a-a366-2ebe2e757d1f";
 
-async function createVolkernLead(payload: Record<string, any>) {
-  if (!VOLKERN_API_KEY) {
-    return { success: false, reason: "Configuración incompleta: Falta VOLKERN_API_KEY en Vercel." };
-  }
-
+async function sendToWebhook(payload: Record<string, any>) {
   try {
-    const response = await fetch(`${VOLKERN_API_URL}/leads`, {
+    const response = await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${VOLKERN_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(8000), // 8s timeout for lead creation
+      signal: AbortSignal.timeout(15000), // 15s timeout for webhook
     });
 
-    const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return { success: false, reason: data.message || data.error || `Status ${response.status}` };
+      const text = await response.text();
+      return { success: false, reason: `Status ${response.status}: ${text}` };
     }
-    return { success: true, data };
+
+    return { success: true };
   } catch (error: any) {
-    return { success: false, reason: error.name === 'AbortError' ? 'Tiempo de espera agotado' : error.message };
+    return { success: false, reason: error.name === 'AbortError' ? 'Tiempo de espera en Webhook agotado' : error.message };
   }
-}
-
-async function createVolkernNote(leadId: string, content: string) {
-  if (!VOLKERN_API_KEY || !leadId) return;
-  try {
-    await fetch(`${VOLKERN_API_URL}/leads/${leadId}/notes`, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${VOLKERN_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ contenido: content }),
-      signal: AbortSignal.timeout(5000), // Independent 5s timeout
-    });
-  } catch (e) { console.error("[Volkern] Note fail:", e); }
-}
-
-async function createVolkernTask(leadId: string, leadNombre: string) {
-  if (!VOLKERN_API_KEY || !leadId) return;
-  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  try {
-    await fetch(`${VOLKERN_API_URL}/leads/${leadId}/tasks`, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${VOLKERN_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tipo: "llamada",
-        titulo: `Llamada seguimiento: ${leadNombre}`,
-        descripcion: "Seguimiento propuesta energética web.",
-        fechaVencimiento: tomorrow.toISOString(),
-      }),
-      signal: AbortSignal.timeout(5000), // Independent 5s timeout
-    });
-  } catch (e) { console.error("[Volkern] Task fail:", e); }
 }
 
 export async function POST(request: NextRequest) {
@@ -72,7 +36,21 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Datos de contacto incompletos" }, { status: 400 });
     }
 
-    // 1. Save locally (Prisma)
+    // 1. Convert to unified format
+    const invoiceSummary = invoice ? `
+--- Detalles de Factura ---
+CUPS: ${invoice.cups || 'No detectado'}
+Dirección: ${invoice.direccion || 'No detectada'}
+Comercializadora: ${invoice.comercializadoraActual || invoice.comercializadora || 'N/A'}
+Tarifa: ${invoice.tarifaActual || invoice.tarifa || 'N/A'}
+Potencia: P1: ${invoice.potenciaP1 || invoice.potencia_p1 || 'N/A'} / P2: ${invoice.potenciaP2 || invoice.potencia_p2 || 'N/A'}
+Consumo: ${invoice.consumoMensual || invoice.consumo_mensual || 'N/A'}
+Importe: ${invoice.importeTotal || invoice.importe_total || 'N/A'}
+    `.trim() : "Lead sin factura adjunta.";
+
+    const finalContext = `${context || ""}\n\n${invoiceSummary}`.trim();
+
+    // 2. Save locally (Prisma)
     const dbLead = await db.lead.create({
       data: {
         nombre: lead.nombre,
@@ -92,48 +70,45 @@ export async function POST(request: NextRequest) {
         fileType: invoice?.file_type || null,
         fileSize: invoice?.file_size || null,
         fileBase64: invoice?.file_base64 || null,
-        invoiceContext: context || null,
+        invoiceContext: finalContext,
       },
     });
 
-    // 2. Try CRM (Lead only)
-    const volkernResult = await createVolkernLead({
-      nombre: lead.nombre,
-      email: lead.email || null,
-      telefono: lead.whatsapp,
-      canal: "web",
-      estado: "nuevo",
-      etiquetas: ["dimension-energy", "analisis-web"],
-      contextoProyecto: context || "Captado desde Dimension Energy",
-    });
+    // 3. Send payload to webhook
+    const webhookPayload = {
+      localId: dbLead.id,
+      lead: {
+        nombre: lead.nombre,
+        email: lead.email || null,
+        telefono: lead.whatsapp,
+        canal: "web",
+        estado: "nuevo",
+        etiquetas: ["dimension-energy", "analisis-web"]
+      },
+      invoice: invoice || {},
+      contextoProyecto: finalContext,
+      invoiceSummary: invoiceSummary
+    };
 
-    // 3. Optional CRM additions (Note/Task) - Do not crash if they fail
-    if (volkernResult.success) {
-      const volkernId = volkernResult.data?.id || volkernResult.data?.lead_id || volkernResult.data?.data?.id;
-      if (volkernId) {
-        const invoiceSummary = `Extracción: CUPS ${invoice?.cups || 'N/A'}, Consumo ${invoice?.consumoMensual || 'N/A'}, Importe ${invoice?.importeTotal || 'N/A'}`;
-        // Parallel Execution BUT sync with await so Vercel doesn't kill it!
-        await Promise.allSettled([
-          createVolkernNote(volkernId, invoiceSummary),
-          createVolkernTask(volkernId, lead.nombre)
-        ]).catch(e => console.error("Optional CRM steps failed", e));
-      }
-    }
+    const webhookResult = await sendToWebhook(webhookPayload);
 
-    // 4. Update local DB with CRM status
+    // 4. Update local DB with Webhook status
     try {
       await db.lead.update({
         where: { id: dbLead.id },
-        data: { crmSent: volkernResult.success, crmResponse: JSON.stringify(volkernResult) },
+        data: { 
+          crmSent: webhookResult.success, 
+          crmResponse: JSON.stringify(webhookResult) 
+        },
       });
     } catch (e) { console.error("Local status update fail", e); }
 
     return NextResponse.json({
       success: true,
-      crmSuccess: volkernResult.success,
-      message: volkernResult.success 
-        ? "Lead registrado con éxito" 
-        : `Guardado localmente. (Error CRM: ${volkernResult.reason || 'Saturación'})`
+      webhookSuccess: webhookResult.success,
+      message: webhookResult.success 
+        ? "Lead registrado y enviado al CRM exitosamente" 
+        : `Guardado localmente. (Error Webhook: ${webhookResult.reason || 'Desconocido'})`
     });
 
   } catch (error: any) {
