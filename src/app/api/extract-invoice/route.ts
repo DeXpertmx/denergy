@@ -9,14 +9,14 @@ Campos requeridos:
   "titular": "Nombre completo",
   "cups": "Código ES... (20-22 caracteres)",
   "direccion": "Dirección de suministro",
-  "comercializadora": "Nombre de la empresa",
-  "tarifa": "Ej: 2.0TD, 3.0TD",
-  "potencia_p1": "Valor en kW",
-  "potencia_p2": "Valor en kW",
-  "consumo_mensual": "Número total de kWh",
-  "importe_total": "Valor con símbolo €",
-  "fecha_factura": "DD/MM/YYYY",
-  "periodo_facturacion": "Rango de fechas o días"
+  "comercializadoraActual": "Nombre de la empresa",
+  "tarifaActual": "Ej: 2.0TD, 3.0TD",
+  "potenciaP1": "Valor en kW",
+  "potenciaP2": "Valor en kW",
+  "consumoMensual": "Número total de kWh",
+  "importeTotal": "Valor con símbolo €",
+  "fechaFactura": "DD/MM/YYYY",
+  "periodoFacturacion": "Rango de fechas o días"
 }
 
 Reglas:
@@ -55,7 +55,11 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Error en extracción:", error);
-    return NextResponse.json({ error: "Error al procesar", details: String(error) }, { status: 500 });
+    const errorMessage = error instanceof Error ? error.message : "Error desconocido";
+    return NextResponse.json({ 
+      error: "Error al procesar la factura", 
+      details: errorMessage 
+    }, { status: 500 });
   }
 }
 
@@ -75,7 +79,7 @@ async function callOpenRouter(base64Data: string, mimeType: string): Promise<str
       "X-Title": "Dimension Energy Extractor",
     },
     body: JSON.stringify({
-      model: "google/gemini-2.0-flash-lite-preview-02-05:free",
+      model: "google/gemini-2.0-flash-exp:free",
       messages: [
         {
           role: "system",
@@ -96,8 +100,7 @@ async function callOpenRouter(base64Data: string, mimeType: string): Promise<str
             }
           ]
         }
-      ],
-      response_format: { type: "json_object" }
+      ]
     })
   });
 

@@ -95,14 +95,14 @@ export default function HomePage() {
           titular: result.data.titular || formData.nombre || '',
           cups: result.data.cups || '',
           direccion: result.data.direccion || '',
-          comercializadoraActual: result.data.comercializadora || result.data.comercializadora_actual || '',
-          tarifaActual: result.data.tarifa || '',
-          potenciaP1: result.data.potencia_p1 || '',
-          potenciaP2: result.data.potencia_p2 || '',
-          consumoMensual: result.data.consumo_mensual || '',
-          importeTotal: result.data.importe_total || '',
-          fechaFactura: result.data.fecha_factura || '',
-          periodoFacturacion: result.data.periodo_facturacion || '',
+          comercializadoraActual: result.data.comercializadoraActual || result.data.comercializadora || result.data.comercializadora_actual || '',
+          tarifaActual: result.data.tarifaActual || result.data.tarifa || result.data.tarifa_actual || '',
+          potenciaP1: result.data.potenciaP1 || result.data.potencia_p1 || '',
+          potenciaP2: result.data.potenciaP2 || result.data.potencia_p2 || '',
+          consumoMensual: result.data.consumoMensual || result.data.consumo_mensual || '',
+          importeTotal: result.data.importeTotal || result.data.importe_total || '',
+          fechaFactura: result.data.fechaFactura || result.data.fecha_factura || '',
+          periodoFacturacion: result.data.periodoFacturacion || result.data.periodo_facturacion || '',
         });
       } else {
         // Fallback: create empty form for manual entry
