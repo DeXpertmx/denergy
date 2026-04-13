@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // Configuración del esquema de respuesta para forzar JSON puro
 const EXTRACTION_PROMPT = `Analiza detalladamente esta factura eléctrica española y extrae los datos técnicos.
@@ -22,7 +21,8 @@ Campos requeridos:
 
 Reglas:
 1. Si un dato no es visible, usa null.
-2. No incluyas texto explicativo, solo el objeto JSON.`;
+2. No incluyas texto explicativo, solo el objeto JSON.
+3. Asegúrate de que el JSON sea válido y no tenga caracteres de control extraños.`;
 
 export async function POST(request: NextRequest) {
   try {
@@ -32,19 +32,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Archivo no proporcionado" }, { status: 400 });
     }
 
-    // Identificar el MIME type para la API de Google
+    // Identificar el MIME type
     const ext = fileName?.split(".").pop()?.toLowerCase() || "";
     let mimeType = "image/jpeg";
     if (ext === "pdf") mimeType = "application/pdf";
     if (ext === "png") mimeType = "image/png";
     if (ext === "webp") mimeType = "image/webp";
 
-    // Llamada directa a la API de Gemini
-    const content = await callGeminiDirect(fileBase64, mimeType);
+    // Llamada a OpenRouter (usando Gemma 2 9B o similar que sea free)
+    const content = await callOpenRouter(fileBase64, mimeType);
+
+    // Intentar extraer el JSON si el modelo incluyó markdown
+    let cleanedContent = content;
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      cleanedContent = jsonMatch[0];
+    }
 
     return NextResponse.json({
       success: true,
-      data: JSON.parse(content) // Gemini 1.5 Flash devolverá JSON válido
+      data: JSON.parse(cleanedContent)
     });
   } catch (error) {
     console.error("Error en extracción:", error);
@@ -52,34 +59,54 @@ export async function POST(request: NextRequest) {
   }
 }
 
-async function callGeminiDirect(base64Data: string, mimeType: string): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("Falta GEMINI_API_KEY");
+async function callOpenRouter(base64Data: string, mimeType: string): Promise<string> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error("Falta OPENROUTER_API_KEY en las variables de entorno");
 
-  const genAI = new GoogleGenerativeAI(apiKey);
-  
-  // Usamos específicamente gemini-1.5-flash
-  const model = genAI.getGenerativeModel({ 
-    model: "gemini-1.5-flash",
-    generationConfig: {
-      temperature: 0.1, // Baja para mayor exactitud en datos numéricos
-      responseMimeType: "application/json", // Característica nativa de Gemini 1.5
-    }
-  });
-
-  // Limpieza de prefijos base64 (data:image/jpeg;base64,...)
+  // Limpieza de prefijos base64
   const base64Content = base64Data.includes(",") ? base64Data.split(",")[1] : base64Data;
 
-  const result = await model.generateContent([
-    {
-      inlineData: {
-        data: base64Content,
-        mimeType: mimeType
-      }
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://dimension-energy.app",
+      "X-Title": "Dimension Energy Extractor",
     },
-    EXTRACTION_PROMPT,
-  ]);
+    body: JSON.stringify({
+      model: "google/gemma-2-9b-it:free",
+      messages: [
+        {
+          role: "system",
+          content: "Eres un experto en extracción de datos de facturas eléctricas españolas. Responde siempre con JSON válido."
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: EXTRACTION_PROMPT
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:${mimeType};base64,${base64Content}`
+              }
+            }
+          ]
+        }
+      ],
+      response_format: { type: "json_object" }
+    })
+  });
 
-  const response = await result.response;
-  return response.text();
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(`OpenRouter Error: ${JSON.stringify(errorData)}`);
+  }
+
+  const result = await response.json();
+  return result.choices[0]?.message?.content || "";
 }
+
