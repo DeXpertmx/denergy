@@ -20,7 +20,7 @@ export interface InvoiceFormData {
   whatsapp: string;
 }
 
-const MAX_FILE_SIZE = 4 * 1024 * 1024; // 4MB (Vercel limit is 4.5MB)
+const MAX_FILE_SIZE = 1.5 * 1024 * 1024; // 1.5MB (Vercel limit is 4.5MB total payload)
 const ACCEPTED_TYPES = [
   'application/pdf',
   'image/jpeg',
@@ -66,7 +66,7 @@ export function InvoiceForm({ onFileSelected }: InvoiceFormProps) {
       return 'Formato no válido. Sube un archivo PDF, JPG o PNG.';
     }
     if (f.size > MAX_FILE_SIZE) {
-      return 'El archivo supera el límite de 10MB.';
+      return 'El archivo supera el límite de 1.5MB.';
     }
     return null;
   };
@@ -240,7 +240,7 @@ export function InvoiceForm({ onFileSelected }: InvoiceFormProps) {
                         <span className="text-de-blue underline">busca un archivo</span>
                       </p>
                       <p className="mt-1 text-xs text-de-text-light">
-                        PDF, JPG o PNG — Máximo 10MB
+                        PDF, JPG o PNG — Máximo 1.5MB
                       </p>
                     </div>
                   </>

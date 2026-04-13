@@ -18,7 +18,8 @@ Responde exclusivamente con un objeto JSON válido (sin explicaciones) con estas
 
 const FREE_MODELS = [
   "google/gemma-4-31b-it:free",
-  "google/gemma-4-26b-a4b-it:free",
+  "google/gemini-2.0-flash-001:free",
+  "qwen/qwen-2-vl-72b-instruct:free",
   "openrouter/free"
 ];
 

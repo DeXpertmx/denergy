@@ -41,7 +41,6 @@ async function createVolkernLead(payload: Record<string, any>) {
 
 async function createVolkernNote(leadId: string, content: string) {
   if (!VOLKERN_API_KEY || !leadId) return;
-
   try {
     await fetch(`${VOLKERN_API_URL}/leads/${leadId}/notes`, {
       method: "POST",
@@ -51,9 +50,34 @@ async function createVolkernNote(leadId: string, content: string) {
       },
       body: JSON.stringify({ contenido: content }),
     });
-    console.log("[Volkern] Note added to lead:", leadId);
-  } catch (error) {
-    console.error("[Volkern] Error adding note:", error);
+  } catch (e) {
+    console.error("[Volkern] Error note:", e);
+  }
+}
+
+async function createVolkernTask(leadId: string, leadNombre: string) {
+  if (!VOLKERN_API_KEY || !leadId) return;
+  
+  // Follow-up task exactly 24 hours from now
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  
+  try {
+    await fetch(`${VOLKERN_API_URL}/leads/${leadId}/tasks`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${VOLKERN_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        tipo: "llamada",
+        titulo: `Llamada de seguimiento: ${leadNombre}`,
+        descripcion: "Dar seguimiento a la propuesta energética enviada desde la web.",
+        fechaVencimiento: tomorrow.toISOString(),
+      }),
+    });
+    console.log("[Volkern] Task created for tomorrow:", tomorrow.toISOString());
+  } catch (e) {
+    console.error("[Volkern] Error task:", e);
   }
 }
 
@@ -62,15 +86,11 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { lead, invoice, context } = body;
 
-    // Validate required fields
     if (!lead?.nombre || !lead?.whatsapp) {
-      return NextResponse.json(
-        { error: "Faltan campos obligatorios para el Lead (nombre y whatsapp)" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Faltan campos obligatorios (nombre y whatsapp)" }, { status: 400 });
     }
 
-    // Prepare Invoice Summary for Note/Context
+    // Prepare Invoice Summary
     const invoiceSummary = invoice ? `
 --- Detalles de Factura ---
 CUPS: ${invoice.cups || 'No detectado'}
@@ -80,12 +100,11 @@ Tarifa: ${invoice.tarifaActual || invoice.tarifa || 'N/A'}
 Potencia: P1: ${invoice.potenciaP1 || invoice.potencia_p1 || 'N/A'} / P2: ${invoice.potenciaP2 || invoice.potencia_p2 || 'N/A'}
 Consumo: ${invoice.consumoMensual || invoice.consumo_mensual || 'N/A'}
 Importe: ${invoice.importeTotal || invoice.importe_total || 'N/A'}
-Fecha: ${invoice.fechaFactura || invoice.fecha_factura || 'N/A'}
-      `.trim() : "Lead sin factura adjunta.";
+    `.trim() : "Lead sin factura adjunta.";
 
     const finalContext = `${context || ""}\n\n${invoiceSummary}`.trim();
 
-    // ---- 1. Save to local database ----
+    // ---- 1. Save locally ----
     const dbLead = await db.lead.create({
       data: {
         nombre: lead.nombre,
@@ -110,7 +129,7 @@ Fecha: ${invoice.fechaFactura || invoice.fecha_factura || 'N/A'}
     });
 
     // ---- 2. Forward to Volkern CRM ----
-    const volkernLeadPayload = {
+    const volkernResult = await createVolkernLead({
       nombre: lead.nombre,
       email: lead.email || null,
       telefono: lead.whatsapp,
@@ -119,19 +138,23 @@ Fecha: ${invoice.fechaFactura || invoice.fecha_factura || 'N/A'}
       etiquetas: ["dimension-energy", "captacion-web", "analisis-energia"],
       contextoProyecto: finalContext,
       notas: `Lead registrado desde el portal Dimension Energy (${new Date().toLocaleString()})`
-    };
+    });
 
-    const volkernResult = await createVolkernLead(volkernLeadPayload);
-
-    // If lead was created in Volkern, ensure detail note is also created
-    // The API usually returns the object directly or nested in { data: { id } }
-    const volkernId = volkernResult.data?.id || volkernResult.data?.data?.id;
+    // Robust ID identification
+    const volkernId = volkernResult.data?.id || 
+                    volkernResult.data?.lead_id || 
+                    volkernResult.data?.data?.id || 
+                    volkernResult.data?.data?.lead_id;
     
     if (volkernResult.success && volkernId) {
-      await createVolkernNote(volkernId, invoiceSummary);
+      // Create Note & Task
+      await Promise.all([
+        createVolkernNote(volkernId, invoiceSummary),
+        createVolkernTask(volkernId, lead.nombre)
+      ]);
     }
 
-    // Update crm status in local DB
+    // Update crm status locally
     await db.lead.update({
       where: { id: dbLead.id },
       data: {
@@ -146,15 +169,12 @@ Fecha: ${invoice.fechaFactura || invoice.fecha_factura || 'N/A'}
       crmSuccess: volkernResult.success,
       crmError: volkernResult.success ? null : volkernResult.reason,
       message: volkernResult.success
-        ? "Lead registrado correctamente en Dimension Energy y Volkern CRM"
-        : `Datos guardados localmente. Error CRM: ${volkernResult.reason || 'Desconocido'}`
+        ? "Lead registrado y tarea de seguimiento agendada en 24h"
+        : `Guardado localmente. Error CRM: ${volkernResult.reason || 'Desconocido'}`
     });
 
   } catch (error) {
-    console.error("[API] Error in submit-lead:", error);
-    return NextResponse.json(
-      { error: "Error interno del servidor", details: String(error) },
-      { status: 500 }
-    );
+    console.error("[API] Error:", error);
+    return NextResponse.json({ error: "Error interno", details: String(error) }, { status: 500 });
   }
 }
