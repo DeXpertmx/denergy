@@ -75,7 +75,7 @@ async function callOpenRouter(base64Data: string, mimeType: string): Promise<str
       "X-Title": "Dimension Energy Extractor",
     },
     body: JSON.stringify({
-      model: "google/gemma-2-9b-it:free",
+      model: "google/gemini-2.0-flash-lite-preview-02-05:free",
       messages: [
         {
           role: "system",
