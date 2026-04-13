@@ -79,11 +79,11 @@ async function callOpenRouter(base64Data: string, mimeType: string): Promise<str
       "X-Title": "Dimension Energy Extractor",
     },
     body: JSON.stringify({
-      model: "google/gemini-2.0-flash-exp:free",
+      model: "google/gemma-4-31b-it:free",
       messages: [
         {
           role: "system",
-          content: "Eres un experto en extracción de datos de facturas eléctricas españolas. Responde siempre con JSON válido."
+          content: "Eres un experto en extracción de datos de facturas eléctricas españolas usando Gemma 4. Responde siempre con JSON válido."
         },
         {
           role: "user",
