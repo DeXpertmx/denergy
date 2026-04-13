@@ -1,20 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const EXTRACTION_PROMPT = `Analiza esta factura eléctrica española y extrae los datos. 
-Responde exclusivamente con un objeto JSON válido con estas claves:
+const EXTRACTION_PROMPT = `Analiza esta factura eléctrica española y extrae los datos técnicos. 
+Responde exclusivamente con un objeto JSON válido (sin explicaciones) con estas claves:
 {
-  "titular": "Nombre",
-  "cups": "ES...",
-  "direccion": "Dirección",
+  "titular": "Nombre del titular",
+  "cups": "Código ES...",
+  "direccion": "Dirección completa",
   "comercializadoraActual": "Empresa",
-  "tarifaActual": "Tarifa",
-  "potenciaP1": "kW",
-  "potenciaP2": "kW",
-  "consumoMensual": "kWh",
-  "importeTotal": "€",
+  "tarifaActual": "Ej: 2.0TD",
+  "potenciaP1": "P1 en kW",
+  "potenciaP2": "P2 en kW",
+  "consumoMensual": "kWh total",
+  "importeTotal": "€ total",
   "fechaFactura": "DD/MM/YYYY",
-  "periodoFacturacion": "Fechas"
+  "periodoFacturacion": "Rango de fechas"
 }`;
+
+const FREE_MODELS = [
+  "google/gemma-4-31b-it:free",
+  "google/gemini-2.0-flash-exp:free",
+  "mistralai/pixtral-12b:free",
+  "meta-llama/llama-3.2-11b-vision-instruct:free"
+];
 
 export async function POST(request: NextRequest) {
   try {
@@ -24,107 +31,121 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Archivo no proporcionado" }, { status: 400 });
     }
 
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json({ error: "Configuración incompleta", details: "Falta OPENROUTER_API_KEY" }, { status: 500 });
+    }
+
     const ext = fileName?.split(".").pop()?.toLowerCase() || "";
     const isPdf = ext === "pdf";
     const mimeType = isPdf ? "application/pdf" : `image/${ext === "png" ? "png" : "jpeg"}`;
-
-    // Clean base64
     const base64Content = fileBase64.includes(",") ? fileBase64.split(",")[1] : fileBase64;
     const dataUrl = `data:${mimeType};base64,${base64Content}`;
 
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json({ error: "Configuración incompleta", details: "Falta OPENROUTER_API_KEY en Vercel" }, { status: 500 });
-    }
-
-    // Build the content array based on file type
+    // Prepare message content once
     const messageContent: any[] = [{ type: "text", text: EXTRACTION_PROMPT }];
-
     if (isPdf) {
-      // Use "file" type for PDFs as per OpenRouter docs
-      messageContent.push({
-        type: "file",
-        file: {
-          file_data: dataUrl
-        }
-      });
+      messageContent.push({ type: "file", file: { file_data: dataUrl } });
     } else {
-      // Use "image_url" for images
-      messageContent.push({
-        type: "image_url",
-        image_url: {
-          url: dataUrl
-        }
-      });
+      messageContent.push({ type: "image_url", image_url: { url: dataUrl } });
     }
 
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://dimension-energy.app",
-        "X-Title": "Dimension Energy Extractor",
-      },
-      body: JSON.stringify({
-        model: "google/gemma-4-31b-it:free",
-        messages: [
-          {
-            role: "user",
-            content: messageContent
-          }
-        ],
-        temperature: 0.1, // Lower temperature for more consistent JSON
-      }),
-    });
-
-    const rawResponse = await response.text();
-    let result;
-
-    try {
-      result = JSON.parse(rawResponse);
-    } catch (e) {
-      console.error("OpenRouter returned non-JSON:", rawResponse);
-      return NextResponse.json({ 
-        error: "Error del proveedor de IA", 
-        details: "El servidor de IA devolvió una respuesta inválida (posiblemente saturación o error 503)." 
-      }, { status: 502 });
-    }
-
-    if (!response.ok) {
-      console.error("OpenRouter Error Details:", result);
-      const errorMsg = result.error?.message || result.error || "Error desconocido en el proveedor";
-      return NextResponse.json({ 
-        error: "Error en la extracción", 
-        details: errorMsg 
-      }, { status: response.status });
-    }
-
-    const content = result.choices?.[0]?.message?.content || "";
+    let lastError = null;
     
-    // Extract JSON from markdown if necessary
-    let cleanedContent = content;
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      cleanedContent = jsonMatch[0];
+    // MODEL ROTATION LOOP
+    for (const modelId of FREE_MODELS) {
+      try {
+        console.log(`Attempting extraction with model: ${modelId}`);
+        
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://dimension-energy.app",
+            "X-Title": "Dimension Energy Extractor",
+          },
+          body: JSON.stringify({
+            model: modelId,
+            messages: [
+              {
+                role: "user",
+                content: messageContent
+              }
+            ],
+            temperature: 0.1,
+          }),
+          // 25 second timeout per attempt to stay within Vercel execution limits
+          signal: AbortSignal.timeout(25000), 
+        });
+
+        const rawResponse = await response.text();
+        let result;
+        
+        try {
+          result = JSON.parse(rawResponse);
+        } catch (e) {
+          console.warn(`Non-JSON response from ${modelId}. Status: ${response.status}`);
+          lastError = `Provider ${modelId} returned invalid response.`;
+          continue; // Try next model
+        }
+
+        if (!response.ok) {
+          const errorMsg = result.error?.message || result.error || "Error desconocido";
+          console.warn(`Model ${modelId} failed with ${response.status}: ${errorMsg}`);
+          
+          // If rate limited or provider error, continue to next model
+          if (response.status === 429 || response.status >= 500) {
+            lastError = `[${modelId}] ${errorMsg}`;
+            continue;
+          }
+          
+          // For other errors (400, 401, 403), stop and report
+          return NextResponse.json({ error: "Error en la extracción", details: `[${modelId}] ${errorMsg}` }, { status: response.status });
+        }
+
+        const content = result.choices?.[0]?.message?.content || "";
+        if (!content) {
+          console.warn(`Model ${modelId} returned empty content.`);
+          continue;
+        }
+
+        // Extract JSON
+        let cleanedContent = content;
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) cleanedContent = jsonMatch[0];
+
+        try {
+          const parsedData = JSON.parse(cleanedContent);
+          return NextResponse.json({ 
+            success: true, 
+            data: parsedData,
+            sourceModel: modelId 
+          });
+        } catch (e) {
+          console.error(`Model ${modelId} output parsing failed. Content:`, content);
+          lastError = `Error de formato en la respuesta de ${modelId}.`;
+          continue;
+        }
+
+      } catch (innerError: any) {
+        console.error(`Error during attempt with ${modelId}:`, innerError);
+        lastError = innerError.message;
+        continue;
+      }
     }
 
-    try {
-      const parsedData = JSON.parse(cleanedContent);
-      return NextResponse.json({ success: true, data: parsedData });
-    } catch (e) {
-      console.error("Failed to parse AI output as JSON:", content);
-      return NextResponse.json({ 
-        error: "Error de formato", 
-        details: "La IA no generó un JSON válido. Reintenta con una imagen más clara." 
-      }, { status: 500 });
-    }
+    // If we exhausted all models
+    return NextResponse.json({ 
+      error: "No se pudo realizar la extracción", 
+      details: `Todos los modelos intentados fallaron o están saturados. Último error: ${lastError}` 
+    }, { status: 503 });
 
-  } catch (error) {
-    console.error("Critical extraction error:", error);
+  } catch (error: any) {
+    console.error("Critical API error:", error);
     return NextResponse.json({ 
       error: "Error interno", 
-      details: error instanceof Error ? error.message : "Error desconocido" 
+      details: error.message 
     }, { status: 500 });
   }
 }
