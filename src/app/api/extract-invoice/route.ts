@@ -18,9 +18,8 @@ Responde exclusivamente con un objeto JSON válido (sin explicaciones) con estas
 
 const FREE_MODELS = [
   "google/gemma-4-31b-it:free",
-  "google/gemini-2.0-flash-exp:free",
-  "mistralai/pixtral-12b:free",
-  "meta-llama/llama-3.2-11b-vision-instruct:free"
+  "google/gemma-4-26b-a4b-it:free",
+  "openrouter/free"
 ];
 
 export async function POST(request: NextRequest) {
@@ -94,14 +93,18 @@ export async function POST(request: NextRequest) {
           const errorMsg = result.error?.message || result.error || "Error desconocido";
           console.warn(`Model ${modelId} failed with ${response.status}: ${errorMsg}`);
           
-          // If rate limited or provider error, continue to next model
-          if (response.status === 429 || response.status >= 500) {
+          // Continue to next model on ALMOST ANY error that isn't Authorisation (401)
+          // This covers 429 (Rate Limit), 404 (No endpoints), 500+ (Server error)
+          if (response.status !== 401) {
             lastError = `[${modelId}] ${errorMsg}`;
             continue;
           }
           
-          // For other errors (400, 401, 403), stop and report
-          return NextResponse.json({ error: "Error en la extracción", details: `[${modelId}] ${errorMsg}` }, { status: response.status });
+          // For Authorisation errors, stop and report (likely API Key issue)
+          return NextResponse.json({ 
+            error: "Error de autenticación", 
+            details: "La API Key de OpenRouter parece inválida o ha expirado." 
+          }, { status: 401 });
         }
 
         const content = result.choices?.[0]?.message?.content || "";
