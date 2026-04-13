@@ -127,7 +127,13 @@ export default function HomePage() {
       }
     } catch (error) {
       console.error('Error extracting invoice:', error);
-      // Fallback: create empty form for manual entry
+      
+      // Attempt to extract details from error if it's a 500 JSON response
+      let errorDetail = 'No se pudo procesar la factura automáticamente. Completa los datos manualmente.';
+      if (error instanceof Error && error.message.includes('API')) {
+        errorDetail = error.message;
+      }
+
       setExtractedData({
         titular: formData.nombre,
         cups: '',
@@ -141,9 +147,10 @@ export default function HomePage() {
         fechaFactura: '',
         periodoFacturacion: '',
       });
+      
       toast({
         title: 'Error en la extracción',
-        description: 'No se pudo procesar la factura automáticamente. Completa los datos manualmente.',
+        description: errorDetail,
         variant: 'destructive',
       });
     }
